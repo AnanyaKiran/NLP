@@ -1,12 +1,13 @@
 """
 predict.py
 ──────────
-Predict the artist for a new art description.
-Uses the best model (Logistic Regression on linguistic + TF-IDF features).
+Fast artist prediction — loads pre-trained model from disk instantly.
+
+IMPORTANT: Run train_and_save.py once before using this script.
 
 Usage:
-    python predict.py "A large ornate figure stands in the foreground..."
-    python predict.py   ← interactive mode
+    python predict.py                    ← interactive mode
+    python predict.py "description..."  ← single prediction
 """
 
 import sys
@@ -14,64 +15,38 @@ import pickle
 import os
 import numpy as np
 from scipy.sparse import hstack, csr_matrix
-
 from feature_extractor import extract_features_single
 
-MODEL_CACHE = "model_cache.pkl"
+CACHE_PATH = "model_cache.pkl"
 
 
-def load_or_train():
-    if os.path.exists(MODEL_CACHE):
-        with open(MODEL_CACHE, "rb") as f:
-            cache = pickle.load(f)
-        print(f"[Model loaded from cache]")
-        return cache
+def load_model():
+    """Load pre-trained model from disk. Exits if not found."""
+    if not os.path.exists(CACHE_PATH):
+        print("\n❌ No trained model found.")
+        print("   Run this first:  python train_and_save.py")
+        print("   (Only needed once — takes ~2–3 minutes)\n")
+        sys.exit(1)
 
-    print("[Cache not found] Training model — this may take a few minutes...")
-    from main import load_data
-    from feature_extractor import extract_features
-    from classifiers import run_classification
-
-    train_df, unknown_df = load_data("caption.csv", "description", "artist_name", 10)
-    feature_df = extract_features(train_df["description"])
-    feature_df["artist"] = train_df["artist_name"].values
-    feature_df["text"]   = train_df["description"].values
-    unknown_feat = extract_features(unknown_df["description"], verbose=False)
-    results = run_classification(feature_df, unknown_feat)
-
-    # Pick best model by CV accuracy
-    model_names = ["Logistic Regression", "LinearSVC + TF-IDF",
-                   "Random Forest", "Hist Gradient Boosting"]
-    best_name = max(model_names, key=lambda n: results[n]["cv_accuracy"])
-    print(f"\n[Best model: {best_name} — CV Acc: {results[best_name]['cv_accuracy']:.3f}]")
-
-    cache = {
-        "model":        results[best_name]["model"],
-        "scaler":       results["boosted_scaler"],
-        "tfidf":        results["tfidf"],
-        "le":           results["label_encoder"],
-        "feature_cols": results[best_name]["feature_names"],
-        "is_sparse":    results[best_name]["is_sparse"],
-        "best_model":   best_name
-    }
-    with open(MODEL_CACHE, "wb") as f:
-        pickle.dump(cache, f)
-    print(f"[Model cached to {MODEL_CACHE}]")
+    with open(CACHE_PATH, "rb") as f:
+        cache = pickle.load(f)
     return cache
 
 
 def predict(text, cache):
-    # Extract linguistic features
+    """Predict artist for a single description string."""
+
+    # Extract spaCy linguistic features
     f = extract_features_single(text)
     if f is None:
-        print("  Could not extract features from this text.")
-        return
+        print("  ⚠️  Could not extract features — try a longer description.")
+        return None
 
-    # Build linguistic feature vector
-    ling_vec = np.array([f.get(c, 0.0) for c in cache["feature_cols"]]).reshape(1, -1)
+    # Build linguistic vector → scale
+    ling_vec    = np.array([f.get(c, 0.0) for c in cache["feature_cols"]]).reshape(1, -1)
     ling_scaled = cache["scaler"].transform(ling_vec)
 
-    # Add TF-IDF features if available
+    # Add TF-IDF vector
     if cache["tfidf"] is not None:
         tfidf_vec = cache["tfidf"].transform([text])
         if cache["is_sparse"]:
@@ -81,33 +56,57 @@ def predict(text, cache):
     else:
         X_input = ling_scaled
 
-    model = cache["model"]
-    probs = model.predict_proba(X_input)[0]
+    # Predict
+    probs = cache["model"].predict_proba(X_input)[0]
     top5  = np.argsort(probs)[::-1][:5]
 
-    preview = text[:80] + "..." if len(text) > 80 else text
-    print(f"\n  Input : \"{preview}\"")
-    print(f"\n  Predicted Artist — Top 5  [{cache.get('best_model','Model')}]")
-    print("  " + "-" * 50)
-    for idx in top5:
+    # Display
+    preview = (text[:80] + "...") if len(text) > 80 else text
+    print(f"\n  📝 Input  : \"{preview}\"")
+    print(f"  🤖 Model  : {cache.get('best_model', 'Unknown')}")
+    print(f"\n  🎨 Predicted Artist — Top 5:")
+    print("  " + "─" * 52)
+    for rank, idx in enumerate(top5, 1):
         artist = cache["le"].inverse_transform([idx])[0]
         conf   = probs[idx] * 100
-        bar    = "█" * int(conf / 2)
-        print(f"  {conf:5.1f}%  {artist:<36} {bar}")
+        bar    = "█" * int(conf / 2.5)
+        marker = " ◀ best" if rank == 1 else ""
+        print(f"  {rank}. {conf:5.1f}%  {artist:<36} {bar}{marker}")
+    print()
+
+    return cache["le"].inverse_transform([top5[0]])[0]
+
+
+def interactive_mode(cache):
+    print("\n" + "=" * 55)
+    print("  🎨 INTERACTIVE ARTIST PREDICTOR")
+    print(f"  Model : {cache.get('best_model', 'Unknown')}")
+    print("=" * 55)
+    print("  Paste an art description and press Enter.")
+    print("  Type 'quit' to exit.\n")
+
+    while True:
+        try:
+            text = input("  Description: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Goodbye!")
+            break
+
+        if text.lower() in ("quit", "exit", "q", ""):
+            print("  Goodbye!")
+            break
+
+        predict(text, cache)
 
 
 if __name__ == "__main__":
-    cache = load_or_train()
+    # Load model instantly from disk
+    cache = load_model()
+    print(f"✅ Model loaded: {cache.get('best_model', 'Unknown')}")
 
     if len(sys.argv) > 1:
+        # Single prediction from command line argument
         predict(" ".join(sys.argv[1:]), cache)
     else:
-        print(f"\n  === INTERACTIVE ARTIST PREDICTOR ===")
-        print(f"  Model : {cache.get('best_model', 'Unknown')}")
-        print(f"  Paste a description and press Enter. Type 'quit' to exit.\n")
-        while True:
-            text = input("  Description: ").strip()
-            if text.lower() in ("quit", "exit", "q"):
-                break
-            if text:
-                predict(text, cache)
+        # Interactive mode
+        interactive_mode(cache)
