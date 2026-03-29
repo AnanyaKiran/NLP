@@ -201,12 +201,8 @@ def extract_features(text_series, batch_size=64, verbose=True):
             f = _extract_from_doc(doc, raw_text)
             records.append(f if f is not None else {})
 
-        if verbose:
-            done = min(i + batch_size, n)
-            print(f"\r  Processing descriptions... {done}/{n}", end="", flush=True)
-
     if verbose:
-        print()
+        print(f"  Processing descriptions... {n}/{n} done.")
 
     df = pd.DataFrame(records).fillna(0)
     return df.reset_index(drop=True)
